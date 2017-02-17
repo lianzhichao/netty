@@ -21,6 +21,10 @@ package io.netty.handler.codec.base64;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.ByteBufUtil;
+import io.netty.util.ByteProcessor;
+
+import java.nio.ByteOrder;
 
 /**
  * Utility class for {@link ByteBuf} that encodes and decodes to and from
@@ -122,12 +126,13 @@ public final class Base64 {
                 len43 +
                         (len % 3 > 0 ? 4 : 0) + // Account for padding
                         (breakLines ? len43 / MAX_LINE_LENGTH : 0)).order(src.order()); // New lines
+        byte[] alphabet = alphabet(dialect);
         int d = 0;
         int e = 0;
         int len2 = len - 2;
         int lineLength = 0;
         for (; d < len2; d += 3, e += 4) {
-            encode3to4(src, d + off, 3, dest, e, dialect);
+            encode3to4(src, d + off, 3, dest, e, alphabet);
 
             lineLength += 4;
 
@@ -139,7 +144,7 @@ public final class Base64 {
         } // end for: each piece of array
 
         if (d < len) {
-            encode3to4(src, d + off, len - d, dest, e, dialect);
+            encode3to4(src, d + off, len - d, dest, e, alphabet);
             e += 4;
         } // end if: some padding needed
 
@@ -153,10 +158,7 @@ public final class Base64 {
 
     private static void encode3to4(
             ByteBuf src, int srcOffset, int numSigBytes,
-            ByteBuf dest, int destOffset, Base64Dialect dialect) {
-
-        byte[] ALPHABET = alphabet(dialect);
-
+            ByteBuf dest, int destOffset, byte[] alphabet) {
         //           1         2         3
         // 01234567890123456789012345678901 Bit position
         // --------000000001111111122222222 Array position from threeBytes
@@ -168,30 +170,91 @@ public final class Base64 {
         // significant bytes passed in the array.
         // We have to shift left 24 in order to flush out the 1's that appear
         // when Java treats a value as negative that is cast from a byte to an int.
-        int inBuff =
-                (numSigBytes > 0? src.getByte(srcOffset)     << 24 >>>  8 : 0) |
-                (numSigBytes > 1? src.getByte(srcOffset + 1) << 24 >>> 16 : 0) |
-                (numSigBytes > 2? src.getByte(srcOffset + 2) << 24 >>> 24 : 0);
+        if (dest.order() == ByteOrder.BIG_ENDIAN) {
+            final int inBuff;
+            if (numSigBytes <= 0) {
+                inBuff = 0;
+            } else if (numSigBytes == 1) {
+                inBuff = src.getByte(srcOffset) << 24 >>> 8;
+            } else if (numSigBytes == 2) {
+                short value = src.getShort(srcOffset);
+                inBuff = ((byte) (value >>> 8)) << 24 >>> 8 |
+                         ((byte) value) << 24 >>> 16;
+            } else {
+                int value = src.getMedium(srcOffset);
+                inBuff = ((byte) (value >>> 16)) << 24 >>> 8 |
+                         ((byte) (value >>> 8)) << 24 >>> 16 |
+                         ((byte) value) << 24 >>> 24;
+            }
+            encode3to4BigEndian(inBuff, numSigBytes, dest, destOffset, alphabet);
+        } else {
+            final int inBuff;
+            if (numSigBytes <= 0) {
+                inBuff = 0;
+            } else if (numSigBytes == 1) {
+                inBuff = src.getByte(srcOffset)  << 24 >>>  8;
+            } else if (numSigBytes == 2) {
+                short value = src.getShort(srcOffset);
+                inBuff = ((byte) value) << 24 >>>  8 |
+                         ((byte) (value >>> 8)) << 24 >>> 16;
+            } else {
+                int value = src.getMedium(srcOffset);
+                inBuff = ((byte) value) << 24 >>> 8          |
+                         ((byte) (value >>> 8)) << 24 >>> 16 |
+                         ((byte) (value >>> 16)) << 24 >>> 24;
+            }
 
+            encode3to4LittleEndian(inBuff, numSigBytes, dest, destOffset, alphabet);
+        }
+    }
+
+    private static void encode3to4BigEndian(
+            int inBuff, int numSigBytes, ByteBuf dest, int destOffset, byte[] alphabet) {
+        // Packing bytes into an int to reduce bound and reference count checking.
         switch (numSigBytes) {
-        case 3:
-            dest.setByte(destOffset    , ALPHABET[inBuff >>> 18       ]);
-            dest.setByte(destOffset + 1, ALPHABET[inBuff >>> 12 & 0x3f]);
-            dest.setByte(destOffset + 2, ALPHABET[inBuff >>>  6 & 0x3f]);
-            dest.setByte(destOffset + 3, ALPHABET[inBuff        & 0x3f]);
-            break;
-        case 2:
-            dest.setByte(destOffset    , ALPHABET[inBuff >>> 18       ]);
-            dest.setByte(destOffset + 1, ALPHABET[inBuff >>> 12 & 0x3f]);
-            dest.setByte(destOffset + 2, ALPHABET[inBuff >>> 6  & 0x3f]);
-            dest.setByte(destOffset + 3, EQUALS_SIGN);
-            break;
-        case 1:
-            dest.setByte(destOffset    , ALPHABET[inBuff >>> 18       ]);
-            dest.setByte(destOffset + 1, ALPHABET[inBuff >>> 12 & 0x3f]);
-            dest.setByte(destOffset + 2, EQUALS_SIGN);
-            dest.setByte(destOffset + 3, EQUALS_SIGN);
-            break;
+            case 3:
+                dest.setInt(destOffset, ((alphabet[inBuff >>> 18       ]) << 24) |
+                                        ((alphabet[inBuff >>> 12 & 0x3f]) << 16) |
+                                        ((alphabet[inBuff >>>  6 & 0x3f]) << 8)  |
+                                        (alphabet[inBuff        & 0x3f]));
+                break;
+            case 2:
+                dest.setInt(destOffset, ((alphabet[inBuff >>> 18       ]) << 24) |
+                                        ((alphabet[inBuff >>> 12 & 0x3f]) << 16) |
+                                        ((alphabet[inBuff >>> 6  & 0x3f]) << 8)  |
+                                        EQUALS_SIGN);
+                break;
+            case 1:
+                dest.setInt(destOffset, ((alphabet[inBuff >>> 18       ]) << 24) |
+                                        ((alphabet[inBuff >>> 12 & 0x3f]) << 16) |
+                                        (EQUALS_SIGN << 8)                       |
+                                        EQUALS_SIGN);
+                break;
+        }
+    }
+
+    private static void encode3to4LittleEndian(
+            int inBuff, int numSigBytes, ByteBuf dest, int destOffset, byte[] alphabet) {
+        // Packing bytes into an int to reduce bound and reference count checking.
+        switch (numSigBytes) {
+            case 3:
+                dest.setInt(destOffset, (alphabet[inBuff >>> 18        ])        |
+                                        ((alphabet[inBuff >>> 12 & 0x3f]) << 8)  |
+                                        ((alphabet[inBuff >>>  6 & 0x3f]) << 16) |
+                                        ((alphabet[inBuff        & 0x3f]) << 24));
+                break;
+            case 2:
+                dest.setInt(destOffset, (alphabet[inBuff >>> 18        ])        |
+                                        ((alphabet[inBuff >>> 12 & 0x3f]) << 8)  |
+                                        ((alphabet[inBuff >>> 6  & 0x3f]) << 16) |
+                                        (EQUALS_SIGN << 24));
+                break;
+            case 1:
+                dest.setInt(destOffset, (alphabet[inBuff >>> 18        ])        |
+                                        ((alphabet[inBuff >>> 12 & 0x3f]) << 8)  |
+                                        (EQUALS_SIGN << 16)                      |
+                                        (EQUALS_SIGN << 24));
+                break;
         }
     }
 
@@ -230,86 +293,114 @@ public final class Base64 {
             throw new NullPointerException("dialect");
         }
 
-        byte[] DECODABET = decodabet(dialect);
+        // Using a ByteProcessor to reduce bound and reference count checking.
+        return new Decoder().decode(src, off, len, allocator, dialect);
+    }
 
-        int len34 = len * 3 / 4;
-        ByteBuf dest = allocator.buffer(len34).order(src.order()); // Upper limit on size of output
-        int outBuffPosn = 0;
+    private static final class Decoder implements ByteProcessor {
 
-        byte[] b4 = new byte[4];
-        int b4Posn = 0;
-        int i;
-        byte sbiCrop;
-        byte sbiDecode;
-        for (i = off; i < off + len; i ++) {
-            sbiCrop = (byte) (src.getByte(i) & 0x7f); // Only the low seven bits
-            sbiDecode = DECODABET[sbiCrop];
+        private final byte[] b4 = new byte[4];
+        private int b4Posn;
+        private byte sbiCrop;
+        private byte sbiDecode;
+        private byte[] decodabet;
+        private int outBuffPosn;
+        private ByteBuf dest;
+
+        ByteBuf decode(ByteBuf src, int off, int len, ByteBufAllocator allocator, Base64Dialect dialect) {
+            int len34 = len * 3 / 4;
+            dest = allocator.buffer(len34).order(src.order()); // Upper limit on size of output
+
+            decodabet = decodabet(dialect);
+            boolean release = true;
+            try {
+                src.forEachByte(off, len, this);
+                ByteBuf slice = dest.slice(0, outBuffPosn);
+                release = false;
+                return slice;
+            } finally {
+                if (release) {
+                    dest.release();
+                }
+            }
+        }
+
+        @Override
+        public boolean process(byte value) throws Exception {
+            sbiCrop = (byte) (value & 0x7f); // Only the low seven bits
+            sbiDecode = decodabet[sbiCrop];
 
             if (sbiDecode >= WHITE_SPACE_ENC) { // White space, Equals sign or better
                 if (sbiDecode >= EQUALS_SIGN_ENC) { // Equals sign or better
                     b4[b4Posn ++] = sbiCrop;
                     if (b4Posn > 3) { // Quartet built
                         outBuffPosn += decode4to3(
-                                b4, 0, dest, outBuffPosn, dialect);
+                                b4, 0, dest, outBuffPosn, decodabet);
                         b4Posn = 0;
 
                         // If that was the equals sign, break out of 'for' loop
                         if (sbiCrop == EQUALS_SIGN) {
-                            break;
+                            return false;
                         }
                     }
                 }
+                return true;
             } else {
                 throw new IllegalArgumentException(
-                        "bad Base64 input character at " + i + ": " +
-                        src.getUnsignedByte(i) + " (decimal)");
+                        "invalid bad Base64 input character: " + (short) (value & 0xFF) + " (decimal)");
             }
         }
 
-        return dest.slice(0, outBuffPosn);
-    }
+        private static int decode4to3(
+                byte[] src, int srcOffset,
+                ByteBuf dest, int destOffset, byte[] decodabet) {
 
-    private static int decode4to3(
-            byte[] src, int srcOffset,
-            ByteBuf dest, int destOffset, Base64Dialect dialect) {
+            if (src[srcOffset + 2] == EQUALS_SIGN) {
+                // Example: Dk==
+                int outBuff =
+                        (decodabet[src[srcOffset    ]] & 0xFF) << 18 |
+                        (decodabet[src[srcOffset + 1]] & 0xFF) << 12;
 
-        byte[] DECODABET = decodabet(dialect);
+                dest.setByte(destOffset, (byte) (outBuff >>> 16));
+                return 1;
+            } else if (src[srcOffset + 3] == EQUALS_SIGN) {
+                // Example: DkL=
+                int outBuff =
+                        (decodabet[src[srcOffset    ]] & 0xFF) << 18 |
+                        (decodabet[src[srcOffset + 1]] & 0xFF) << 12 |
+                        (decodabet[src[srcOffset + 2]] & 0xFF) <<  6;
 
-        if (src[srcOffset + 2] == EQUALS_SIGN) {
-            // Example: Dk==
-            int outBuff =
-                    (DECODABET[src[srcOffset    ]] & 0xFF) << 18 |
-                    (DECODABET[src[srcOffset + 1]] & 0xFF) << 12;
-
-            dest.setByte(destOffset, (byte) (outBuff >>> 16));
-            return 1;
-        } else if (src[srcOffset + 3] == EQUALS_SIGN) {
-            // Example: DkL=
-            int outBuff =
-                    (DECODABET[src[srcOffset    ]] & 0xFF) << 18 |
-                    (DECODABET[src[srcOffset + 1]] & 0xFF) << 12 |
-                    (DECODABET[src[srcOffset + 2]] & 0xFF) <<  6;
-
-            dest.setByte(destOffset    , (byte) (outBuff >>> 16));
-            dest.setByte(destOffset + 1, (byte) (outBuff >>>  8));
-            return 2;
-        } else {
-            // Example: DkLE
-            int outBuff;
-            try {
-                outBuff =
-                        (DECODABET[src[srcOffset    ]] & 0xFF) << 18 |
-                        (DECODABET[src[srcOffset + 1]] & 0xFF) << 12 |
-                        (DECODABET[src[srcOffset + 2]] & 0xFF) <<  6 |
-                         DECODABET[src[srcOffset + 3]] & 0xFF;
-            } catch (IndexOutOfBoundsException ignored) {
-                throw new IllegalArgumentException("not encoded in Base64");
+                // Packing bytes into a short to reduce bound and reference count checking.
+                if (dest.order() == ByteOrder.BIG_ENDIAN) {
+                    dest.setShort(destOffset,
+                            (short) (((byte) (outBuff >> 16)) << 8 |
+                                    ((byte) (outBuff >>  8)) & 0xFF));
+                } else {
+                    dest.setShort(destOffset,
+                            (short) (((byte) (outBuff >> 16)) & 0xFF |
+                                    ((byte) (outBuff >>  8)) << 8));
+                }
+                return 2;
+            } else {
+                // Example: DkLE
+                int outBuff;
+                try {
+                    outBuff =
+                            (decodabet[src[srcOffset    ]] & 0xFF) << 18 |
+                            (decodabet[src[srcOffset + 1]] & 0xFF) << 12 |
+                            (decodabet[src[srcOffset + 2]] & 0xFF) <<  6 |
+                             decodabet[src[srcOffset + 3]] & 0xFF;
+                } catch (IndexOutOfBoundsException ignored) {
+                    throw new IllegalArgumentException("not encoded in Base64");
+                }
+                // Just directly set it as medium
+                if (dest.order() == ByteOrder.BIG_ENDIAN) {
+                    dest.setMedium(destOffset, outBuff);
+                } else {
+                    dest.setMedium(destOffset, ByteBufUtil.swapMedium(outBuff));
+                }
+                return 3;
             }
-
-            dest.setByte(destOffset    , (byte) (outBuff >> 16));
-            dest.setByte(destOffset + 1, (byte) (outBuff >>  8));
-            dest.setByte(destOffset + 2, (byte)  outBuff);
-            return 3;
         }
     }
 
