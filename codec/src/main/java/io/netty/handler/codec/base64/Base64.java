@@ -170,7 +170,7 @@ public final class Base64 {
         // significant bytes passed in the array.
         // We have to shift left 24 in order to flush out the 1's that appear
         // when Java treats a value as negative that is cast from a byte to an int.
-        if (dest.order() == ByteOrder.BIG_ENDIAN) {
+        if (src.order() == ByteOrder.BIG_ENDIAN) {
             final int inBuff;
             if (numSigBytes <= 0) {
                 inBuff = 0;
@@ -213,22 +213,25 @@ public final class Base64 {
         // Packing bytes into an int to reduce bound and reference count checking.
         switch (numSigBytes) {
             case 3:
-                dest.setInt(destOffset, ((alphabet[inBuff >>> 18       ]) << 24) |
-                                        ((alphabet[inBuff >>> 12 & 0x3f]) << 16) |
-                                        ((alphabet[inBuff >>>  6 & 0x3f]) << 8)  |
-                                        (alphabet[inBuff        & 0x3f]));
+                dest.setInt(destOffset, (alphabet[inBuff >>> 18       ] << 24) |
+                                        (alphabet[inBuff >>> 12 & 0x3f] << 16) |
+                                        (alphabet[inBuff >>>  6 & 0x3f] << 8)  |
+                                        alphabet[inBuff        & 0x3f]);
                 break;
             case 2:
-                dest.setInt(destOffset, ((alphabet[inBuff >>> 18       ]) << 24) |
-                                        ((alphabet[inBuff >>> 12 & 0x3f]) << 16) |
-                                        ((alphabet[inBuff >>> 6  & 0x3f]) << 8)  |
+                dest.setInt(destOffset, (alphabet[inBuff >>> 18       ] << 24) |
+                                        (alphabet[inBuff >>> 12 & 0x3f] << 16) |
+                                        (alphabet[inBuff >>> 6  & 0x3f] << 8)  |
                                         EQUALS_SIGN);
                 break;
             case 1:
-                dest.setInt(destOffset, ((alphabet[inBuff >>> 18       ]) << 24) |
-                                        ((alphabet[inBuff >>> 12 & 0x3f]) << 16) |
-                                        (EQUALS_SIGN << 8)                       |
+                dest.setInt(destOffset, (alphabet[inBuff >>> 18       ] << 24) |
+                                        (alphabet[inBuff >>> 12 & 0x3f] << 16) |
+                                        (EQUALS_SIGN << 8)                     |
                                         EQUALS_SIGN);
+                break;
+            default:
+                // NOOP
                 break;
         }
     }
@@ -238,22 +241,25 @@ public final class Base64 {
         // Packing bytes into an int to reduce bound and reference count checking.
         switch (numSigBytes) {
             case 3:
-                dest.setInt(destOffset, (alphabet[inBuff >>> 18        ])        |
-                                        ((alphabet[inBuff >>> 12 & 0x3f]) << 8)  |
-                                        ((alphabet[inBuff >>>  6 & 0x3f]) << 16) |
-                                        ((alphabet[inBuff        & 0x3f]) << 24));
+                dest.setInt(destOffset, alphabet[inBuff >>> 18        ]        |
+                                        (alphabet[inBuff >>> 12 & 0x3f] << 8)  |
+                                        (alphabet[inBuff >>>  6 & 0x3f] << 16) |
+                                        (alphabet[inBuff        & 0x3f] << 24));
                 break;
             case 2:
-                dest.setInt(destOffset, (alphabet[inBuff >>> 18        ])        |
-                                        ((alphabet[inBuff >>> 12 & 0x3f]) << 8)  |
-                                        ((alphabet[inBuff >>> 6  & 0x3f]) << 16) |
+                dest.setInt(destOffset, alphabet[inBuff >>> 18        ]        |
+                                        (alphabet[inBuff >>> 12 & 0x3f] << 8)  |
+                                        (alphabet[inBuff >>> 6  & 0x3f] << 16) |
                                         (EQUALS_SIGN << 24));
                 break;
             case 1:
-                dest.setInt(destOffset, (alphabet[inBuff >>> 18        ])        |
-                                        ((alphabet[inBuff >>> 12 & 0x3f]) << 8)  |
-                                        (EQUALS_SIGN << 16)                      |
+                dest.setInt(destOffset, alphabet[inBuff >>> 18        ]        |
+                                        (alphabet[inBuff >>> 12 & 0x3f] << 8)  |
+                                        (EQUALS_SIGN << 16)                    |
                                         (EQUALS_SIGN << 24));
+                break;
+            default:
+                // NOOP
                 break;
         }
     }
@@ -308,7 +314,7 @@ public final class Base64 {
         private ByteBuf dest;
 
         ByteBuf decode(ByteBuf src, int off, int len, ByteBufAllocator allocator, Base64Dialect dialect) {
-            int len34 = len * 3 / 4;
+            int len34 = (len * 3) >>> 2;
             dest = allocator.buffer(len34).order(src.order()); // Upper limit on size of output
 
             decodabet = decodabet(dialect);
@@ -334,8 +340,7 @@ public final class Base64 {
                 if (sbiDecode >= EQUALS_SIGN_ENC) { // Equals sign or better
                     b4[b4Posn ++] = sbiCrop;
                     if (b4Posn > 3) { // Quartet built
-                        outBuffPosn += decode4to3(
-                                b4, 0, dest, outBuffPosn, decodabet);
+                        outBuffPosn += decode4to3(b4, 0, dest, outBuffPosn, decodabet);
                         b4Posn = 0;
 
                         // If that was the equals sign, break out of 'for' loop
@@ -345,10 +350,9 @@ public final class Base64 {
                     }
                 }
                 return true;
-            } else {
-                throw new IllegalArgumentException(
-                        "invalid bad Base64 input character: " + (short) (value & 0xFF) + " (decimal)");
             }
+            throw new IllegalArgumentException(
+                    "invalid bad Base64 input character: " + (short) (value & 0xFF) + " (decimal)");
         }
 
         private static int decode4to3(
@@ -383,7 +387,7 @@ public final class Base64 {
                 return 2;
             } else {
                 // Example: DkLE
-                int outBuff;
+                final int outBuff;
                 try {
                     outBuff =
                             (decodabet[src[srcOffset    ]] & 0xFF) << 18 |
