@@ -23,6 +23,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.util.ByteProcessor;
+import io.netty.util.internal.PlatformDependent;
 
 import java.nio.ByteOrder;
 
@@ -159,6 +160,8 @@ public final class Base64 {
     private static void encode3to4(
             ByteBuf src, int srcOffset, int numSigBytes,
             ByteBuf dest, int destOffset, byte[] alphabet) {
+        final int inBuff = toInt(src, srcOffset, numSigBytes);
+
         //           1         2         3
         // 01234567890123456789012345678901 Bit position
         // --------000000001111111122222222 Array position from threeBytes
@@ -170,98 +173,59 @@ public final class Base64 {
         // significant bytes passed in the array.
         // We have to shift left 24 in order to flush out the 1's that appear
         // when Java treats a value as negative that is cast from a byte to an int.
-        if (src.order() == ByteOrder.BIG_ENDIAN) {
-            final int inBuff;
-            if (numSigBytes <= 0) {
-                inBuff = 0;
-            } else if (numSigBytes == 1) {
-                inBuff = src.getByte(srcOffset) << 24 >>> 8;
-            } else if (numSigBytes == 2) {
-                short value = src.getShort(srcOffset);
-                inBuff = ((byte) (value >>> 8)) << 24 >>> 8 |
-                         ((byte) value) << 24 >>> 16;
-            } else {
-                int value = src.getMedium(srcOffset);
-                inBuff = ((byte) (value >>> 16)) << 24 >>> 8 |
-                         ((byte) (value >>> 8)) << 24 >>> 16 |
-                         ((byte) value) << 24 >>> 24;
-            }
-            encode3to4BigEndian(inBuff, numSigBytes, dest, destOffset, alphabet);
+
+        // Packing bytes into an int to reduce bound and reference count checking.
+        final int value;
+        switch (numSigBytes) {
+            case 3:
+                value = (alphabet[inBuff >>> 18       ] << 24) |
+                        (alphabet[inBuff >>> 12 & 0x3f] << 16) |
+                        (alphabet[inBuff >>>  6 & 0x3f] << 8)  |
+                        alphabet[inBuff        & 0x3f];
+                break;
+            case 2:
+                value = (alphabet[inBuff >>> 18       ] << 24) |
+                        (alphabet[inBuff >>> 12 & 0x3f] << 16) |
+                        (alphabet[inBuff >>> 6  & 0x3f] << 8)  |
+                        EQUALS_SIGN;
+                break;
+            case 1:
+                value = (alphabet[inBuff >>> 18       ] << 24) |
+                        (alphabet[inBuff >>> 12 & 0x3f] << 16) |
+                        (EQUALS_SIGN << 8)                     |
+                        EQUALS_SIGN;
+                break;
+            default:
+                // NOOP
+                return;
+        }
+        if (dest.order() == ByteOrder.BIG_ENDIAN) {
+            dest.setInt(destOffset, value);
         } else {
-            final int inBuff;
-            if (numSigBytes <= 0) {
-                inBuff = 0;
-            } else if (numSigBytes == 1) {
-                inBuff = src.getByte(srcOffset)  << 24 >>>  8;
-            } else if (numSigBytes == 2) {
+            dest.setIntLE(destOffset, value);
+        }
+    }
+
+    private static int toInt(ByteBuf src, int srcOffset, int numSigBytes) {
+        final int rvalue;
+
+        switch (numSigBytes) {
+            case 1:
+                rvalue =  src.getByte(srcOffset) << 24 >>> 8;
+                break;
+            case 2:
                 short value = src.getShort(srcOffset);
-                inBuff = ((byte) value) << 24 >>>  8 |
-                         ((byte) (value >>> 8)) << 24 >>> 16;
-            } else {
-                int value = src.getMedium(srcOffset);
-                inBuff = ((byte) value) << 24 >>> 8          |
-                         ((byte) (value >>> 8)) << 24 >>> 16 |
-                         ((byte) (value >>> 16)) << 24 >>> 24;
-            }
-
-            encode3to4LittleEndian(inBuff, numSigBytes, dest, destOffset, alphabet);
-        }
-    }
-
-    private static void encode3to4BigEndian(
-            int inBuff, int numSigBytes, ByteBuf dest, int destOffset, byte[] alphabet) {
-        // Packing bytes into an int to reduce bound and reference count checking.
-        switch (numSigBytes) {
-            case 3:
-                dest.setInt(destOffset, (alphabet[inBuff >>> 18       ] << 24) |
-                                        (alphabet[inBuff >>> 12 & 0x3f] << 16) |
-                                        (alphabet[inBuff >>>  6 & 0x3f] << 8)  |
-                                        alphabet[inBuff        & 0x3f]);
-                break;
-            case 2:
-                dest.setInt(destOffset, (alphabet[inBuff >>> 18       ] << 24) |
-                                        (alphabet[inBuff >>> 12 & 0x3f] << 16) |
-                                        (alphabet[inBuff >>> 6  & 0x3f] << 8)  |
-                                        EQUALS_SIGN);
-                break;
-            case 1:
-                dest.setInt(destOffset, (alphabet[inBuff >>> 18       ] << 24) |
-                                        (alphabet[inBuff >>> 12 & 0x3f] << 16) |
-                                        (EQUALS_SIGN << 8)                     |
-                                        EQUALS_SIGN);
+                rvalue = (value & 0xff00) << 8 | (value & 0xff) << 8;
                 break;
             default:
-                // NOOP
+                if (numSigBytes <= 0) {
+                    return 0;
+                }
+                int v = src.getMedium(srcOffset);
+                rvalue = (v & 0xff0000) | (v & 0xff00) | (v & 0xff);
                 break;
         }
-    }
-
-    private static void encode3to4LittleEndian(
-            int inBuff, int numSigBytes, ByteBuf dest, int destOffset, byte[] alphabet) {
-        // Packing bytes into an int to reduce bound and reference count checking.
-        switch (numSigBytes) {
-            case 3:
-                dest.setInt(destOffset, alphabet[inBuff >>> 18        ]        |
-                                        (alphabet[inBuff >>> 12 & 0x3f] << 8)  |
-                                        (alphabet[inBuff >>>  6 & 0x3f] << 16) |
-                                        (alphabet[inBuff        & 0x3f] << 24));
-                break;
-            case 2:
-                dest.setInt(destOffset, alphabet[inBuff >>> 18        ]        |
-                                        (alphabet[inBuff >>> 12 & 0x3f] << 8)  |
-                                        (alphabet[inBuff >>> 6  & 0x3f] << 16) |
-                                        (EQUALS_SIGN << 24));
-                break;
-            case 1:
-                dest.setInt(destOffset, alphabet[inBuff >>> 18        ]        |
-                                        (alphabet[inBuff >>> 12 & 0x3f] << 8)  |
-                                        (EQUALS_SIGN << 16)                    |
-                                        (EQUALS_SIGN << 24));
-                break;
-            default:
-                // NOOP
-                break;
-        }
+        return src.order() == ByteOrder.BIG_ENDIAN ? rvalue : ByteBufUtil.swapInt(rvalue);
     }
 
     public static ByteBuf decode(ByteBuf src) {
@@ -318,16 +282,14 @@ public final class Base64 {
             dest = allocator.buffer(len34).order(src.order()); // Upper limit on size of output
 
             decodabet = decodabet(dialect);
-            boolean release = true;
             try {
                 src.forEachByte(off, len, this);
                 ByteBuf slice = dest.slice(0, outBuffPosn);
-                release = false;
                 return slice;
-            } finally {
-                if (release) {
-                    dest.release();
-                }
+            } catch (Throwable cause) {
+                dest.release();
+                PlatformDependent.throwException(cause);
+                return null;
             }
         }
 
@@ -375,14 +337,12 @@ public final class Base64 {
                         (decodabet[src[srcOffset + 2]] & 0xFF) <<  6;
 
                 // Packing bytes into a short to reduce bound and reference count checking.
+                short value = (short) (((byte) (outBuff >> 16)) << 8 |
+                        ((byte) (outBuff >>  8)) & 0xFF);
                 if (dest.order() == ByteOrder.BIG_ENDIAN) {
-                    dest.setShort(destOffset,
-                            (short) (((byte) (outBuff >> 16)) << 8 |
-                                    ((byte) (outBuff >>  8)) & 0xFF));
+                    dest.setShort(destOffset, value);
                 } else {
-                    dest.setShort(destOffset,
-                            (short) (((byte) (outBuff >> 16)) & 0xFF |
-                                    ((byte) (outBuff >>  8)) << 8));
+                    dest.setShortLE(destOffset, value);
                 }
                 return 2;
             } else {
@@ -401,7 +361,7 @@ public final class Base64 {
                 if (dest.order() == ByteOrder.BIG_ENDIAN) {
                     dest.setMedium(destOffset, outBuff);
                 } else {
-                    dest.setMedium(destOffset, ByteBufUtil.swapMedium(outBuff));
+                    dest.setMediumLE(destOffset, outBuff);
                 }
                 return 3;
             }
